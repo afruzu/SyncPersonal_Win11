@@ -19,6 +19,9 @@ Il software è scritto in **Python 3.10+** e utilizza le seguenti librerie:
 * `psutil`: Per il monitoraggio dinamico dei dischi.
 * `pystray` & `Pillow`: Per la gestione dell'icona nella barra di sistema.
 
+Puoi installare tutte le dipendenze con un singolo comando:
+`pip install customtkinter psutil pystray Pillow`
+
 ## 🚀 Come si usa
 
 1. **Avvio**: Lancia lo script. Se è la prima volta, vedrai i due pannelli vuoti.
@@ -36,9 +39,3 @@ Il software non sporca il registro di sistema. Salva i suoi metadati in:
 
 * Il software impedisce fisicamente di selezionare la stessa unità come sorgente e destinazione.
 * In caso di crash o spegnimento improvviso, il sistema di recovery analizza l'ultimo stato noto per riprendere la sincronizzazione dal punto in cui era rimasta.
-
----
-requirements:
-
-perIl codice sorgente necessita delle seguenti librerie python che si possono  installare tutte con un solo comando di terminale:
-`pip install customtkinter psutil pystray Pillow`

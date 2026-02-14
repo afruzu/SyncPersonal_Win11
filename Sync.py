@@ -64,8 +64,23 @@ class SyncApp(ctk.CTk):
                 with open(self.metadata_file, 'r') as f:
                     data = json.load(f)
                     self.source_drive.set(data.get("source_drive", ""))
-                    self.target_drive.set(data.get("target_drive", ""))
-                    self.TargetRootPath.set(data.get("target_sub_root", ""))
+                    
+                    # FIX: Correzione chiave JSON e integrazione Smart Search [Art. 7.4]
+                    saved_target_drive = data.get("target_drive_letter", "")
+                    saved_rel_path = data.get("target_relative_path", "")
+                    
+                    # Se il drive salvato non esiste più, cerca ovunque
+                    if saved_target_drive and not os.path.exists(saved_target_drive):
+                        found_path = self.find_destination_on_any_drive(saved_rel_path)
+                        if found_path:
+                            saved_target_drive = os.path.splitdrive(found_path)[0] + "\\"
+                            self.TargetRootPath.set(found_path)
+                    else:
+                        # Ricostruisce il path completo se il drive è ancora lì
+                        if saved_target_drive and saved_rel_path:
+                            self.TargetRootPath.set(os.path.join(saved_target_drive, saved_rel_path))
+
+                    self.target_drive.set(saved_target_drive)
                     
                     # Carichiamo gli alberi se i drive sono salvati
                     if self.source_drive.get(): self.tree_insert_folders("left")
@@ -198,9 +213,9 @@ class SyncApp(ctk.CTk):
 
     def trigger_smart_sync(self):
         if self.sync_timer_id: self.after_cancel(self.sync_timer_id)
-        self.LabelStatus.configure(text="MODIFICHE RILEVATE", text_color="#1E90FF")
-        self.StatusDot.configure(text_color="#1E90FF")
-        self.LabelNext.configure(text="Sincronizzazione programmata...")
+        self.update_ui_safe(self.LabelStatus.configure, text="MODIFICHE RILEVATE", text_color="#1E90FF")
+        self.update_ui_safe(self.StatusDot.configure, text_color="#1E90FF")
+        self.update_ui_safe(self.LabelNext.configure, text="Sincronizzazione programmata...")
         self.sync_timer_id = self.after(self.ritardo_esecuzione, self.run_sync_thread)
 
     def run_sync_thread(self):
@@ -208,14 +223,18 @@ class SyncApp(ctk.CTk):
             self.LabelStatus.configure(text="SYNC SOSPESA: NO DEST", text_color="orange")
             return
         threading.Thread(target=self.sync_engine, daemon=True).start()
-        
+    
+    def update_ui_safe(self, func, *args, **kwargs):
+        """Helper per aggiornare la UI dal thread in modo sicuro."""
+        self.after(0, lambda: func(*args, **kwargs))
+
     def sync_engine(self):
         """Motore Mirroring Resistente: ignora i blocchi di sistema [Art. 8]."""
         try:
             self.last_sync_status = "IN_PROGRESS"
-            self.save_config()
-            self.StatusDot.configure(text_color="red")
-            self.LabelStatus.configure(text="SINCRONIZZAZIONE...", text_color="red")
+            self.after(0, self.save_config) # Save config deve girare nel main thread se tocca la UI (Treeview)
+            self.update_ui_safe(self.StatusDot.configure, text_color="red")
+            self.update_ui_safe(self.LabelStatus.configure, text="SINCRONIZZAZIONE...", text_color="red")
             
             job_list = self.generate_manifest()
             target_root = self.TargetRootPath.get()
@@ -244,16 +263,16 @@ class SyncApp(ctk.CTk):
 
             self.last_sync_time = datetime.datetime.now().strftime("%H:%M:%S")
             self.last_sync_status = "SUCCESS"
-            self.LabelStatus.configure(text="MONITORAGGIO ATTIVO", text_color="green")
-            self.StatusDot.configure(text_color="green")
-            self.LabelLastSync.configure(text=f"ULTIMO BACKUP: {self.last_sync_time}")
-            self.LabelNext.configure(text="IN ATTESA MODIFICHE")
+            self.update_ui_safe(self.LabelStatus.configure, text="MONITORAGGIO ATTIVO", text_color="green")
+            self.update_ui_safe(self.StatusDot.configure, text_color="green")
+            self.update_ui_safe(self.LabelLastSync.configure, text=f"ULTIMO BACKUP: {self.last_sync_time}")
+            self.update_ui_safe(self.LabelNext.configure, text="IN ATTESA MODIFICHE")
         except:
             self.last_sync_status = "FAILED"
-            self.StatusDot.configure(text_color="orange")
+            self.update_ui_safe(self.StatusDot.configure, text_color="orange")
         finally:
             self.sync_timer_id = None
-            self.save_config()
+            self.after(0, self.save_config)
 
     def setup_tray(self):
         icon_img = self.create_tray_icon_img()
@@ -461,19 +480,50 @@ class SyncApp(ctk.CTk):
         return None
     
     def restore_checks(self, paths_to_check):
-        """Rimette le spunte ☑ nell'interfaccia basandosi sul JSON [Art. 9.1]."""
-        def search_and_check(node_id):
-            current_full_path = self.get_full_path(self.LeftTree, node_id, self.source_drive.get())
-            if current_full_path in paths_to_check:
-                self.set_node_state(node_id, "CHECKED")
-                self.update_parent_states(node_id)
-            
-            # Espandi se necessario per cercare nei figli
-            for child in self.LeftTree.get_children(node_id):
-                search_and_check(child)
+        """Ripristina le spunte espandendo automaticamente l'albero [Art. 9.1]."""
+        if not paths_to_check: return
+        
+        source_drive = self.source_drive.get()
+        # Ordina per lunghezza: processa prima le cartelle in alto per efficienza
+        paths_to_check.sort(key=len)
 
-        for root_node in self.LeftTree.get_children(""):
-            search_and_check(root_node)
+        for full_path in paths_to_check:
+            # Ignora percorsi che non appartengono al drive attuale
+            if not full_path.lower().startswith(source_drive.lower()): continue
+            
+            rel_path = os.path.relpath(full_path, source_drive)
+            if rel_path == ".": continue
+            
+            parts = rel_path.split(os.sep)
+            current_node = "" # Parte dalla radice
+            path_exists = True
+            
+            for part in parts:
+                found = False
+                # Cerca il segmento del percorso tra i figli del nodo corrente
+                for child in self.LeftTree.get_children(current_node):
+                    txt = self.LeftTree.item(child, "text")
+                    # Pulisce il nome dai simboli di stato (☑, ☐, ◩) per il confronto
+                    clean_name = txt[2:] if txt.startswith((self.CHECKED_CHAR, self.UNCHECKED_CHAR, self.PARTIAL_CHAR)) else txt
+                    
+                    if clean_name == part:
+                        current_node = child
+                        found = True
+                        break
+                
+                if found:
+                    # Se il nodo è "dummy" (non ancora caricato), forza l'espansione
+                    children = self.LeftTree.get_children(current_node)
+                    if children and self.LeftTree.item(children[0], "text") == "dummy":
+                        self.on_tree_expand(None, self.LeftTree, source_drive, target_id=current_node)
+                else:
+                    path_exists = False
+                    break
+            
+            # Se il percorso è stato trovato interamente, applica la spunta
+            if path_exists and current_node:
+                self.set_node_state(current_node, "CHECKED")
+                self.update_parent_states(current_node)
 
 
     def reset_destination(self):
